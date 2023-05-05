@@ -398,7 +398,7 @@ function P.Post(endpoint, body, repeatcount)
 		res, err = sock:receive('*a')
 		sock:close()
 
-		log(res, err)
+		debuglog(res, err)
 	  else
 		log('connect error', err)
 	  end
