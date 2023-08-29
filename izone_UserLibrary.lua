@@ -3,8 +3,7 @@
 -- User Library
 
 -- Supports both resident and event-based invocation to provide full two-way control between C-Bus and the iZone system.
-
--- * Auto-create objects in the script so we aren't dependent on the user creating them.
+-- Updated to leverage v2 APIs and Zone Control
 ------------------------------------------------------------
 
 ----------------------------------------
@@ -15,16 +14,13 @@
 -- The IP address of the iZone Wifi Bridge
 local IZONE_IP = "192.168.1.115"
 
--- The number of zones defined in your iZone system
-local IZONE_ZONES = 5
-
 ----------
 -- C-Bus Lighting-like Application
 -- This creates a two-way mapping so that you can control the A/C functions from C-Bus and from visualisations
 -- NOTE: These must be unique and not conflict with any other units or scripts
 -- NOTE: They must also be created on the Objects page and set to an initial value otherwise they will not work!
 
--- The Application for the following groups (default is 'Heating')
+-- The Application for the following groups (default is 'Lighting')
 local CBUS_APP = 56
 
 -- The C-Bus Group to map to the iZone Aircon On/Off state
@@ -36,9 +32,10 @@ local CBUS_MODE_GROUP = 151
 -- The C-Bus Group to map to the iZone Aircon Fan state
 local CBUS_FAN_GROUP = 152
 
+-- Note: the following groups are for zones - the number of these must equal or exceed IZONE_ZONES
 -- The C-Bus Groups to map to each of the Zones' On/Off states
--- Note: the number of these must equal or exceed IZONE_ZONES
 local CBUS_ZONE_GROUPS = { 155, 156, 157, 158, 159 }
+
 
 ----------
 -- NAC User Param application
@@ -46,11 +43,16 @@ local CBUS_ZONE_GROUPS = { 155, 156, 157, 158, 159 }
 -- NOTE: These must be unique and not conflict with any other units or scripts
 -- NOTE: They must also be created on the Objects page and set to an initial value otherwise they will not work!
 local CBUS_USERPARAM_APP = 250
-local CBUS_USERPARAM_GA_SETPOINT = "0/250/0"
-local CBUS_USERPARAM_NAME_UPDATED = "acupdated"
+local CBUS_USERPARAM_GA_SETPOINT = "0/250/0" --the current setpoint
+local CBUS_USERPARAM_NAME_UPDATED = "acupdated" --when the 
 local CBUS_USERPARAM_NAME_SETPOINT = "acsetpoint"
 local CBUS_USERPARAM_NAME_SETPOINTACTIVE = "acsetpointactive"
 local CBUS_USERPARAM_NAME_TEMP = "actemp"
+
+-- The C-Bus Groups to map to each of the Zones' Setpoint states
+local CBUS_ZONE_SETPOINT_GROUPS = { 200, 201, 202, 203, 204 }
+-- The C-Bus Groups to map to each of the Zones' Setpoint states
+local CBUS_ZONE_TEMP_GROUPS = { 210, 211, 212, 213, 214 }
 
 ----------
 -- C-Bus Measurement Application
@@ -62,12 +64,12 @@ local CBUS_MEASUREMENT_DEVICE = 1
 local CBUS_MEASUREMENT_CHANNEL_SETPOINT = 1
 local CBUS_MEASUREMENT_CHANNEL_TEMP = 2
 local CBUS_MEASUREMENT_CHANNEL_SETPOINTACTIVE = 3
-local CBUS_MEASUREMENT_CHANNEL_GROUPS = { 4, 5, 6, 7, 8 }
+local CBUS_MEASUREMENT_CHANNEL_GROUPS = { 4, 5, 6, 7, 8 } --zone setpoints
 
 -- The time in minutes between each Measurement update
 local CBUS_MEASUREMENT_INTERVAL_MINS = 5
 
--- Individual zone temps
+-- OBSOLETE Individual zone temps
 local updatezonetemp = true
 ----------------------------------------
 -- SCRIPT CONSTANTS
@@ -86,9 +88,12 @@ local CBUS_USERPARAM_NAME_DEBUGLOGGING = "Debug Logging"
 local IZONE_POST_ATTEMPTS = 5
 
 -- Keywords used by the iZone API.  These must be in the same order as the corresponding C-Bus Levels, starting from 0, 1, 2, 3...
-local AC_MODE_NAMES = { "cool", "heat", "vent", "dry", "auto" }
-local AC_FAN_NAMES = { "auto", "low", "med", "high" }
-local AC_FAN_NAMES_POST = { "auto", "low", "medium", "high", "boost" }
+local AC_MODE_NAMES = { "NA", "cool", "heat", "vent", "dry", "auto", "exhaust" }
+local AC_FAN_NAMES = { "NA", "low", "med", "high", "auto", "boost" }
+-- local AC_FAN_NAMES_POST = { "auto", "low", "medium", "high", "boost" } --redundant in v2 API
+
+-- The number of zones defined in your iZone system.  Technically you could calculate this, but it seems like a waste of an API
+local IZONE_ZONES = #CBUS_ZONE_GROUPS
 
 ----------------------------------------
 -- SCRIPT BEGINS
@@ -135,26 +140,6 @@ local function debuglogflush()
     logflush()
   end
 end
-
-
---[[
-SetpointActive object: data = "26"
-pollinterval = ""
-updatetime = "1517922475"
-datatype = "14"
-decoded = "true"
-disablelog = "0"
-tagcache = ""
-id = "4194304003"
-readoninit = "0"
-datahex = "41D00000"
-units = ""
-value = "26"
-highpriolog = "0"
-comment = ""
-address = "0/250/3"
-export = "0"
-]]--
 
 local function clearObject(name)
   local obj = grp.find(name)
@@ -211,48 +196,6 @@ local function table_getIndex(table, value)
   end
 end
 
-function P.ModeToLevel(acmode)
-  local idx = table_getIndex(AC_MODE_NAMES, acmode)
-  if ( idx ~= nil ) then
-    return idx - 1
-  else
-    return nil
-  end
-end
-
-function P.LevelToMode(cbuslevel)
-  return AC_MODE_NAMES[cbuslevel + 1]
-end
-
-function P.FanToLevel(acfan)
-  local idx = table_getIndex(AC_FAN_NAMES, acfan)
-  if ( idx ~= nil ) then
-    return idx - 1
-  else
-    return nil
-  end
-end
-
-function P.LevelToFan(cbuslevel)
-  return AC_FAN_NAMES[cbuslevel + 1]
-end
-
-
-
--- unused function
--- cbusLevel = (acLevel * 10 ) - 100
--- AC=10.0 => C-Bus=0, AC=35.5 => C-Bus=255
-function P.TempToLevel(actemp) 
-  return ( actemp * 10 ) - 100
-end
-
--- unused function
--- AcLevel = (cbusLevel / 10 ) + 10
--- C-Bus=0 => AC=10.0, C-Bus=255 => AC=35.5
-function P.LevelToTemp(cbuslevel) 
-  return ( cbuslevel / 10 ) + 10  
-end
-
 -- C-BUS FUNCTIONS
 
 local function GroupAddressMatches(value,net,app,group)
@@ -281,10 +224,10 @@ function P.GetCbusSystemSettings()
   local result = {}
   result["SystemOn"] = cbus_GetState(CBUS_APP, CBUS_SYSTEMON_GROUP)
   local cbusModeLevel = cbus_GetLevel(CBUS_APP, CBUS_MODE_GROUP)
-  result["SystemMode"] = P.LevelToMode(cbusModeLevel)
+  result["SystemMode"] = cbusModeLevel
   result["SystemModeAsLevel"] = cbusModeLevel
   local cbusFanLevel = cbus_GetLevel(CBUS_APP, CBUS_FAN_GROUP)
-  result["SystemFan"] = P.LevelToFan(cbusFanLevel)
+  result["SystemFan"] = cbusFanLevel
   result["SystemFanAsLevel"] = cbusFanLevel
   return result
 end
@@ -300,78 +243,7 @@ function P.Get(endpoint)
   return result
 end
 
-
--- Get System Settings data
-function P.GetSystemSettings() 
-  local result = {}
-  local httpresult = P.Get("SystemSettings")
-  local httptable = json.decode(httpresult)
-  debuglog(httptable)
-  result["SystemOn"] = ( httptable["SysOn"] == "on" )
-  result["SystemMode"] = ( httptable["SysMode"] )
-  result["SystemFan"] = ( httptable["SysFan"] )
-  result["Setpoint"] = ( httptable["Setpoint"] )
-  result["Temp"] = ( httptable["Temp"] )
-  result["ZoneCount"] = ( httptable["NoOfZones"] )
-  result["FanAuto"] = ( httptable["FanAuto"] )
-  return result
-end
-
-
--- Get Zone data
--- NOTE: This always returns details for zones 1..8
--- TODO: Perform smarter queries based on IZONE_ZONES, e.g. calling Zones9_12 etc.
-function P.GetZones() 
-  local result = {}
-  
-  local httpresult = P.Get("Zones1_4")
-  local httptable = json.decode(httpresult)
-  debuglog(httptable)
-  for httptableindex = 1,4,1
-  do
-    local resultitem = {}
-    resultitem["Number"] = httptableindex
-    resultitem["Name"] = httptable[httptableindex]["Name"]
-    resultitem["ZoneTemp"] = httptable[httptableindex]["Temp"]
-    resultitem['ZoneSetpoint'] = httptable[httptableindex]["SetPoint"]
-    resultitem["On"] = ( httptable[httptableindex]["Mode"] == "auto" )
-    table.insert(result, resultitem)
-  end
-
-  local httpresult = P.Get("Zones5_8")
-  local httptable = json.decode(httpresult)
-  debuglog(httptable)
-  for httptableindex = 1,4,1
-  do
-    local resultitem = {}
-    resultitem["Number"] = httptableindex + 4
-    resultitem["Name"] = httptable[httptableindex]["Name"]
-    resultitem["ZoneTemp"] = httptable[httptableindex]["Temp"]
-    resultitem['ZoneSetpoint'] = httptable[httptableindex]["SetPoint"]
-    resultitem["On"] = ( httptable[httptableindex]["Mode"] == "auto" )
-    table.insert(result, resultitem)
-  end
-
- 
-  return result
-end
-
--- Post a command to the system
--- NOTE: The iZone system misses a lot of commands. Tweak the repeatcount until it works.
---[[function P.Post(endpoint, body, repeatcount)
-
-function P.Post(endpoint, body, repeatcount)
-  local url = 'http://' .. IZONE_IP .. '/' .. endpoint
-  log( "POST "..repeatcount.."x :\n"..url.."\n"..body )
-  for i = 1,repeatcount,1
-  do 
-		local result,content,header = http.request(url, body)
-  end
-  return result
-end
-]]--
-
--- NEW POST FUNCTION
+-- POST FUNCTION CONFORMING TO V2 API
 function P.Post(endpoint, body, repeatcount)
 
 	host = '192.168.1.115'
@@ -399,21 +271,56 @@ function P.Post(endpoint, body, repeatcount)
 		sock:close()
 
 		debuglog(res, err)
+    return res
 	  else
 		log('connect error', err)
 	  end
 	end
 end
 
+--Get System Settings data V2 API WIP
+
+function P.GetSystemSettings2() 
+  local result = {}
+  local getSettingsBody = '{"iZoneV2Request": {"Type": 7,"No": 0,"No1": 0}}'
+  local getSettingEndpoint = "iZoneRequestV2"
+  local httpresult = P.Post(getSettingEndpoint,getSettingsBody,1) --get data from the API
+  local httpresultchar = string.find(httpresult,"{") --find where the json package starts
+  local httpresultjson = string.sub(httpresult,httpresultchar) --extract just the json component
+  local httptable = json.decode(httpresultjson) --convert from string
+  debuglog(httptable)  
+  --System Status Data
+  result["SystemOn"] = ( tonumber(httptable["iZoneStatusV2"]["SysOn"]) == 1 )
+  result["SystemMode"] = ( tonumber(httptable["iZoneStatusV2"]["SysMode"] ))
+  result["SystemFan"] = ( tonumber(httptable["iZoneStatusV2"]["SysFan"] ))
+  result["Setpoint"] = ( tonumber(httptable["iZoneStatusV2"]["Setpoint"] ) /100 )
+  result["Temp"] = ( tonumber(httptable["iZoneStatusV2"]["Temp"] )/100)
+  result["SupplyTemp"] = ( tonumber(httptable["iZoneStatusV2"]["Supply"] )/100)
+  result["Warnings"] = ( httptable["iZoneStatusV2"]["Warnings"] )
+  
+  -- Zone Status Data
+  for httptableindex = 1,5,1
+  do
+    local resultitem = {}
+ 		resultitem["Number"] = httptableindex
+    resultitem["ZoneTemp"] = tonumber(httptable["iZoneStatusV2"]["Zones"][httptableindex]["Temp"])/100
+    resultitem['ZoneSetpoint'] = tonumber(httptable["iZoneStatusV2"]["Zones"][httptableindex]["Setpoint"])/100
+    resultitem["On"] = ( tonumber(httptable["iZoneStatusV2"]["Zones"][httptableindex]["Mode"]) ~= 2 )
+    table.insert(result, resultitem)
+  end
+  debuglog(result)
+  return result
+
+end
 
 -- RESIDENT SCRIPT FUNCTIONS
 -- Create a resident script and add a single line to call the below.
 
 function P.Resident_Poll()
   
-  local ac = P.GetSystemSettings()
-  ac["SystemModeAsLevel"] = P.ModeToLevel(ac["SystemMode"])
-  ac["SystemFanAsLevel"] = P.FanToLevel(ac["SystemFan"])
+  local ac = P.GetSystemSettings2()
+  ac["SystemModeAsLevel"] = ac["SystemMode"]
+  ac["SystemFanAsLevel"] = ac["SystemFan"]
   debuglog(ac)
 
   -- Update the user parameters as often as we can, for display on screen
@@ -437,7 +344,15 @@ function P.Resident_Poll()
     debuglogbuild("SetpointActive object: "..tostring2(grp.find("0/250/3")))
   end
   debuglogflush()
-
+  
+  -- Update the Zone Setpoint User Parameters
+  for zoneIndex = 1,IZONE_ZONES,1 
+  do
+    -- local cbusZoneOn = cbus_GetState(CBUS_APP, CBUS_ZONE_GROUPS[zoneIndex])
+    SetUserParam(0, CBUS_ZONE_SETPOINT_GROUPS[zoneIndex],ac[zoneIndex]["ZoneSetpoint"])
+    SetUserParam(0, CBUS_ZONE_TEMP_GROUPS[zoneIndex],ac[zoneIndex]["ZoneTemp"])
+  end
+  
   -- Send a measurement event at specific intervals, for charting
   local lasttime = storage.get('lastmeasurementtimestamp', 0)
   local thistime = os.time()  -- lua's time resolution is only in seconds 
@@ -459,6 +374,11 @@ function P.Resident_Poll()
       debuglogbuild("Setpoint Active : trying to set set to nil so it doesn't plot on trend")
       clearObject("0/"..CBUS_MEASUREMENT_APP.."/"..CBUS_MEASUREMENT_DEVICE.."/"..CBUS_MEASUREMENT_CHANNEL_SETPOINTACTIVE)
     end
+    -- update zone measurements
+    for zoneIndex = 1,IZONE_ZONES,1 
+    do
+      SetCBusMeasurement(0, CBUS_MEASUREMENT_DEVICE, CBUS_MEASUREMENT_CHANNEL_GROUPS[zoneIndex], ac[zoneIndex]["ZoneTemp"], CBUS_MEASUREMENT_UNIT_CELSIUS) 
+    end
     -- set storage variable myobjectdata to a specified value (e.g. 127)
     storage.set('lastmeasurementtimestamp', lasttime)
   end
@@ -470,41 +390,8 @@ function P.Resident_Poll()
   local cbus = P.GetCbusSystemSettings()
   debuglogbuild("System On : ac=" .. tostring(ac["SystemOn"]) .. " cbus=" .. tostring(cbus["SystemOn"]) )
   debuglogbuild("System Mode : ac=" .. tostring(ac["SystemMode"]) .. " ("..tostring(ac["SystemModeAsLevel"])..") cbus=" .. tostring(cbus["SystemMode"]).. " ("..tostring(cbus["SystemModeAsLevel"])..")" )
-  local acFanLevel = P.FanToLevel(ac["SystemFan"])
+  local acFanLevel = ac["SystemFan"] -- obsolete, tidy this up one day
   debuglogbuild("System Fan : ac=" .. tostring(ac["SystemFan"]) .. " ("..tostring(ac["SystemFanAsLevel"])..") cbus=" .. tostring(cbus["SystemFan"]).." (" .. tostring(cbus["SystemFanAsLevel"])..")" )
-
---[[
-	local cbusSetpointLevel = cbus_GetLevel(SYSTEMSETPOINT_APP, SYSTEMSETPOINT_GROUP)
-  local cbusSetpointTemp = CbusLevelToAcTemp(cbusSetpointLevel)
-  local acSetpointLevel = AcTempToCbusLevel(ac["Setpoint"])
-  log("System Setpoint : ac=" .. tostring(ac["Setpoint"]) .. " ("..tostring(acSetpointLevel)..") cbus=" .. tostring(cbusSetpointTemp).. " (".. tostring(cbusSetpointLevel)..")" )
-
-  local cbusTempLevel = cbus_GetLevel(SYSTEMTEMP_APP, SYSTEMTEMP_GROUP)
-  local cbusTemp = CbusLevelToAcTemp(cbusTempLevel)
-  local acTempLevel = AcTempToCbusLevel(ac["Temp"])
-  log("System Current Temperature : ac=" .. tostring(ac["Temp"]) .. " ("..tostring(acTempLevel)..") cbus=" .. tostring(cbusTemp).. " (".. tostring(cbusTempLevel)..")" )
-]]
-
-  local acz = P.GetZones()
-  debuglog(acz)
-  
-  local acZoneCount = ac["ZoneCount"]  
-  for zoneIndex = 1,acZoneCount,1 
-  do
-    local cbusZoneOn = cbus_GetState(CBUS_APP, CBUS_ZONE_GROUPS[zoneIndex])
-    local acZoneOn = acz[zoneIndex]["On"]
-    if updatezonetemp == true then
-    SetCBusMeasurement(0, CBUS_MEASUREMENT_DEVICE, CBUS_MEASUREMENT_CHANNEL_GROUPS[zoneIndex], acz[zoneIndex]["ZoneTemp"], CBUS_MEASUREMENT_UNIT_CELSIUS)
-    end
-    debuglogbuild("Zone " .. zoneIndex .. " On : ac=" .. tostring(acZoneOn) .. " cbus=" .. tostring(cbusZoneOn))
-    -- debuglogbuild("thistime " .. tostring(thistime) .. " lasttime" .. tostring(lasttime) .. " interval" .. tostring (interval))
-    -- debuglogbuild("Setting Zone ".. zoneIndex.. "temperature to " .. tostring(acz[zoneIndex]["ZoneSetpoint"]) .. at "channel " .. tostring(CBUS_MEASUREMENT_CHANNEL_GROUPS[zoneIndex]))
-  end
-  
-  debuglogbuild("Shall we update the zone temp? " .. tostring(updatezonetemp))
-  updatezonetemp = false
-  
-  logflush()
   
   -- Update the C-Bus groups, if needed
   
@@ -522,21 +409,11 @@ function P.Resident_Poll()
     storage.set("izone.disable_event_handler.systemfan", true)
     cbus_SetLevel(CBUS_APP, CBUS_FAN_GROUP, ac["SystemFanAsLevel"])
   end
-
---[[
-  if ( acSetpointLevel ~= nil and acSetpointLevel ~= cbusSetpointLevel ) then
-    cbus_SetLevel(SYSTEMSETPOINT_APP, SYSTEMSETPOINT_GROUP, acSetpointLevel)
-  end
-  
-  if ( acTempLevel ~= nil and acTempLevel ~= cbusTempLevel ) then
-    cbus_SetLevel(SYSTEMTEMP_APP, SYSTEMTEMP_GROUP, acTempLevel)
-  end
-]]
-  
-  for zoneIndex = 1,acZoneCount,1 
+  -- don't forget the zones  
+  for zoneIndex = 1,IZONE_ZONES,1 
   do
     local cbusZoneOn = cbus_GetState(CBUS_APP, CBUS_ZONE_GROUPS[zoneIndex])
-    local acZoneOn = acz[zoneIndex]["On"]
+    local acZoneOn = ac[zoneIndex]["On"]
     if ( acZoneOn ~= cbusZoneOn ) then
       storage.set("izone.disable_event_handler.systemzones", true)
       cbus_SetState(CBUS_APP, CBUS_ZONE_GROUPS[zoneIndex], acZoneOn)
@@ -565,10 +442,6 @@ function P.Event_Handler()
     end
   end
   
--- log( tostring2( event) )
-
---  local cbus = P.GetCbusSystemSettings()
-  
   if ( GroupAddressMatches( event.dst, 0, CBUS_APP, CBUS_SYSTEMON_GROUP ) ) then
     if ( storage.get("izone.disable_event_handler.systemon") == true ) then
       storage.delete("izone.disable_event_handler.systemon")
@@ -583,26 +456,29 @@ function P.Event_Handler()
         P.Post("SystemON", '{"SystemON":"off"}', IZONE_POST_ATTEMPTS)
       end
     end
+  --this has been updated to v2 API for mode conr
   elseif ( GroupAddressMatches( event.dst, 0, CBUS_APP, CBUS_MODE_GROUP ) ) then
     if ( storage.get("izone.disable_event_handler.systemmode") == true ) then
       storage.delete("izone.disable_event_handler.systemmode")
       return
     else
       local cbusModeLevel = GetCBusLevel(0, CBUS_APP, CBUS_MODE_GROUP)
-      local cbusMode = P.LevelToMode(cbusModeLevel)
+      local cbusMode = cbusModeLevel
       log("Executing action: Mode '" .. tostring(cbusMode) .. "'.")
-      P.Post("SystemMODE", '{"SystemMODE":"' .. cbusMode .. '"}', IZONE_POST_ATTEMPTS)
+      P.Post("iZoneCommandV2", '{"SysMode":' .. cbusMode .. '}', IZONE_POST_ATTEMPTS)
     end
+  --this has been updated to v2 API for fan control
   elseif ( GroupAddressMatches( event.dst, 0, CBUS_APP, CBUS_FAN_GROUP ) ) then
     if ( storage.get("izone.disable_event_handler.systemfan") == true ) then
       storage.delete("izone.disable_event_handler.systemfan")
       return
     else
       local cbusFanLevel = GetCBusLevel(0, CBUS_APP, CBUS_FAN_GROUP)
-      local cbusFan = AC_FAN_NAMES_POST[cbusFanLevel + 1]
+      local cbusFan = cbusFanLevel
       log("Executing action: Fan '" .. tostring(cbusFan) .. "'.")
-      P.Post("SystemFAN", '{"SystemFAN":"' .. cbusFan .. '"}', IZONE_POST_ATTEMPTS)
+      P.Post("iZoneCommandV2", '{"SysFan":' .. cbusFan .. '}', IZONE_POST_ATTEMPTS)
     end
+ --this has no value when zones are used to control, so not updated.
   elseif ( event.dst == CBUS_USERPARAM_GA_SETPOINT ) then
     if ( storage.get("izone.disable_event_handler.setpoint") == true ) then
       storage.delete("izone.disable_event_handler.setpoint")
@@ -613,7 +489,8 @@ function P.Event_Handler()
       P.Post("UnitSetpoint", '{"UnitSetpoint":"' .. cbusSetpoint .. '"}', IZONE_POST_ATTEMPTS)
     end
   else
-	  for zoneIndex = 1,IZONE_ZONES,1 
+	  --this has been updated for the new post API V2
+    for zoneIndex = 1,IZONE_ZONES,1 
     do
       if ( GroupAddressMatches( event.dst, 0, CBUS_APP, CBUS_ZONE_GROUPS[zoneIndex] ) ) then
         if ( storage.get("izone.disable_event_handler.systemzones") == true ) then
@@ -623,12 +500,12 @@ function P.Event_Handler()
           local cbusZoneOn = GetCBusState(0, CBUS_APP, CBUS_ZONE_GROUPS[zoneIndex])
           if ( cbusZoneOn == true ) then
             log("Executing action: Zone " .. zoneIndex .. " on.")
-            local body = '{"ZoneCommand":{"ZoneNo":"' .. zoneIndex .. '","Command":"open"}}'
-            P.Post("ZoneCommand", body, IZONE_POST_ATTEMPTS)
+            local body = '{"ZoneMode":{"Index":' .. zoneIndex -1 .. ',"Mode":3}}'
+            P.Post("iZoneCommandV2", body, IZONE_POST_ATTEMPTS)
           else
             log("Executing action: Zone " .. zoneIndex .. " off.")
-            local body = '{"ZoneCommand":{"ZoneNo":"' .. zoneIndex .. '","Command":"close"}}'
-            P.Post("ZoneCommand", body, IZONE_POST_ATTEMPTS)
+            local body = '{"ZoneMode":{"Index":' .. zoneIndex -1 .. ',"Mode":2}}'
+            P.Post("iZoneCommandV2", body, IZONE_POST_ATTEMPTS)
           end
         end
         do return end        
